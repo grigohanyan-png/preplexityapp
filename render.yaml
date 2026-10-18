@@ -3,6 +3,6 @@ services:
     name: flask-app
     env: python
     buildCommand: ""
-    startCommand: gunicorn app:app
+    startCommand: gunicorn app:app --timeout 150
     plan: free
 
