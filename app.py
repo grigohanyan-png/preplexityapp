@@ -6,7 +6,8 @@ import uuid
 from flask import Flask, render_template, request, redirect, url_for, session
 import requests
 import markdown
-from markupsafe import Markup
+import nh3
+from markupsafe import Markup, escape
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-only-change-me")
@@ -42,6 +43,30 @@ def pop_result(result_id):
     except OSError:
         pass
     return data
+
+
+# Model output is untrusted: keep only the tags Markdown produces, and force
+# links to open safely in a new tab.
+ALLOWED_TAGS = {
+    "p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
+    "strong", "em", "b", "i", "del", "code", "pre", "blockquote",
+    "ul", "ol", "li", "a",
+    "table", "thead", "tbody", "tr", "th", "td",
+}
+ALLOWED_ATTRIBUTES = {"a": {"href", "title"}, "th": {"align"}, "td": {"align"}}
+
+
+def render_markdown(text):
+    html = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br'])
+    html = nh3.clean(
+        html,
+        tags=ALLOWED_TAGS,
+        attributes=ALLOWED_ATTRIBUTES,
+        url_schemes={"http", "https", "mailto"},
+        link_rel="noopener noreferrer nofollow",
+        set_tag_attribute_values={"a": {"target": "_blank"}},
+    )
+    return html
 
 
 def ask_agent(question):
@@ -95,12 +120,9 @@ def index():
                     markdown_content += "\n\n**Sources**\n\n" + "\n".join(
                         f"- [{title}]({link})" for link, title in sources.items()
                     )
-                html_content = markdown.markdown(
-                    markdown_content,
-                    extensions=['fenced_code', 'tables', 'nl2br']
-                )
+                html_content = render_markdown(markdown_content)
             except Exception as e:
-                html_content = f"Error: {e}"
+                html_content = str(escape(f"Error: {e}"))
             session['result_id'] = save_result(user_input, str(html_content))
         
         # Redirect to prevent resubmission
