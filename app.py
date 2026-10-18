@@ -1,15 +1,72 @@
+import json
 import os
+import tempfile
+import uuid
 
 from flask import Flask, render_template, request, redirect, url_for, session
 import requests
 import markdown
-from markupsafe import Markup
+import nh3
+from markupsafe import Markup, escape
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-only-change-me")
 
 AGENT_URL = "https://api.perplexity.ai/v1/agent"
 AGENT_PRESET = os.environ.get("PERPLEXITY_PRESET", "low")
+
+# Results live on disk, not in the cookie session (cookies cap out near 4 KB).
+# The temp dir is shared by all gunicorn workers on the instance.
+RESULTS_DIR = os.path.join(tempfile.gettempdir(), "preplexity-results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+
+def save_result(prompt, html):
+    result_id = uuid.uuid4().hex
+    with open(os.path.join(RESULTS_DIR, result_id + ".json"), "w") as f:
+        json.dump({"prompt": prompt, "result": html}, f)
+    return result_id
+
+
+def pop_result(result_id):
+    """Load a stored result once and delete it; return {} if missing."""
+    if not result_id or not result_id.isalnum():
+        return {}
+    path = os.path.join(RESULTS_DIR, result_id + ".json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    return data
+
+
+# Model output is untrusted: keep only the tags Markdown produces, and force
+# links to open safely in a new tab.
+ALLOWED_TAGS = {
+    "p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
+    "strong", "em", "b", "i", "del", "code", "pre", "blockquote",
+    "ul", "ol", "li", "a",
+    "table", "thead", "tbody", "tr", "th", "td",
+}
+ALLOWED_ATTRIBUTES = {"a": {"href", "title"}, "th": {"align"}, "td": {"align"}}
+
+
+def render_markdown(text):
+    html = markdown.markdown(text, extensions=['fenced_code', 'tables', 'nl2br'])
+    html = nh3.clean(
+        html,
+        tags=ALLOWED_TAGS,
+        attributes=ALLOWED_ATTRIBUTES,
+        url_schemes={"http", "https", "mailto"},
+        link_rel="noopener noreferrer nofollow",
+        set_tag_attribute_values={"a": {"target": "_blank"}},
+    )
+    return html
 
 
 def ask_agent(question):
@@ -63,23 +120,18 @@ def index():
                     markdown_content += "\n\n**Sources**\n\n" + "\n".join(
                         f"- [{title}]({link})" for link, title in sources.items()
                     )
-                html_content = markdown.markdown(
-                    markdown_content,
-                    extensions=['fenced_code', 'tables', 'nl2br']
-                )
-                # Store result in session
-                session['result'] = str(html_content)
-                session['prompt'] = user_input
+                html_content = render_markdown(markdown_content)
             except Exception as e:
-                session['result'] = f"Error: {e}"
-                session['prompt'] = user_input
+                html_content = str(escape(f"Error: {e}"))
+            session['result_id'] = save_result(user_input, str(html_content))
         
         # Redirect to prevent resubmission
         return redirect(url_for('index'))
     
     # GET request - display result if available
-    result = Markup(session.pop('result', ''))  # pop removes it after displaying
-    prompt = session.pop('prompt', '')
+    data = pop_result(session.pop('result_id', None))
+    result = Markup(data.get('result', ''))
+    prompt = data.get('prompt', '')
     
     return render_template("index.html", result=result, prompt=prompt)
 

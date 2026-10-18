@@ -31,7 +31,14 @@ document.addEventListener('DOMContentLoaded', function() {
         // Submit with Ctrl/Cmd + Enter
         if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
             e.preventDefault();
-            form.submit();
+            // requestSubmit() fires the submit event (spinner) and runs
+            // validation; form.submit() would skip both.
+            if (form.requestSubmit) {
+                form.requestSubmit();
+            } else if (form.reportValidity()) {
+                form.dispatchEvent(new Event('submit'));
+                form.submit();
+            }
         }
     });
     
